@@ -3,4 +3,4 @@ torch
 numpy
 pandas
 recbole>=1.2.0
-streamlit-gsheets-connection
+st-gsheets-connection
