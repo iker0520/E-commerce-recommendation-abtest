@@ -57,7 +57,7 @@ class MockDataset:
 
 def load_translations():
     """번역 파일 로드 및 매핑 딕셔너리 생성 (공백 제거 로직 추가)"""
-    csv_path = 'translation_progress.csv'
+    csv_path = './data/translation_progress.csv'
     if not os.path.exists(csv_path):
         st.warning("⚠️ translation_progress.csv 파일을 찾을 수 없습니다.")
         return {}, {}, {}
