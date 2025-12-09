@@ -191,7 +191,7 @@ def check_cycle_filtering(days_ago, cycle_info):
     p10 = cycle_info.get('p10', 0)
     p25 = cycle_info.get('p25', 0)
     
-    if days_ago < p10: return random.random() < 0.95
+    if days_ago < p10: return random.random() < 1
     elif p10 <= days_ago < p25: return random.random() < 0.5
     else: return False
 
