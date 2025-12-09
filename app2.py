@@ -10,7 +10,7 @@ import re
 import glob
 
 # ------------------------------------------------------------------
-# 1. [필수] 모듈 경로 및 라이브러리 가짜 등록
+# 1. [필수] 모듈 경로 및 라이브러리 가짜 등록 (기존 유지)
 # ------------------------------------------------------------------
 import tisasrec_local
 sys.modules['TiSASRec'] = tisasrec_local
@@ -120,7 +120,7 @@ def load_models():
     return sas_model, tis_model, tis_maxlen, tis_timespan, safe_n
 
 # ------------------------------------------------------------------
-# 3. [기능 업그레이드] 페르소나 데이터 로드 함수 (다중 파일 지원)
+# 3. [기능 업그레이드] 페르소나 데이터 로드 함수 (폴더 경로 수정 반영)
 # ------------------------------------------------------------------
 def load_persona_history(all_df, filename):
     # data/personas 폴더 안에서 파일을 찾습니다.
@@ -131,7 +131,7 @@ def load_persona_history(all_df, filename):
         return []
 
     try:
-        # 한글 인코딩 호환성 처리 (utf-8 시도 후 실패하면 cp949)
+        # 한글 인코딩 호환성 처리
         try:
             df = pd.read_csv(persona_path, encoding='utf-8')
         except UnicodeDecodeError:
@@ -139,12 +139,12 @@ def load_persona_history(all_df, filename):
 
         history = []
         for _, row in df.iterrows():
-            # 1. 시점 변환: "30일 전" -> 30
+            # 1. 시점 변환: "30일 전" -> 30 (숫자만 추출)
             days_str = str(row.get('시점', '0'))
             days_match = re.search(r'\d+', days_str)
             days = int(days_match.group()) if days_match else 0
             
-            # 2. 아이템 이름 확인
+            # 2. 아이템 이름 확인 (csv 컬럼명 대응)
             item_name = row.get('상품 선택') or row.get('name')
             if not item_name: continue
 
@@ -159,7 +159,7 @@ def load_persona_history(all_df, filename):
                     'days_ago': days
                 })
             else:
-                # 매핑 실패는 조용히 넘어감 (로그만 남김)
+                # 매핑 실패 시 로깅 (UI에는 띄우지 않음)
                 print(f"매핑 실패: {item_name}")
                 
         return history
@@ -183,15 +183,16 @@ def main():
     valid_tokens = [t for t, i in vocab_tis['token2id'].items() if i < safe_n]
     ui_df = all_df[all_df['item_id'].astype(str).isin(valid_tokens) & (all_df['purchase_count'] >= 10)].copy()
 
+    # 세션 상태 초기화
     if 'history' not in st.session_state: st.session_state['history'] = []
 
     # ---------------- Sidebar: 입력 UI ----------------
     st.sidebar.header("🛒 구매 이력 구성")
     
-    # [1] 페르소나 선택 섹션 (업그레이드)
+    # [1] 페르소나 선택 섹션 (업데이트: 폴더 스캔 및 선택 안함 옵션)
     st.sidebar.subheader("1. 페르소나 선택")
     
-    # personas 폴더 내의 csv 파일 목록 가져오기
+    # personas 폴더 자동 생성 및 파일 스캔
     persona_dir = os.path.join('data', 'personas')
     if not os.path.exists(persona_dir):
         os.makedirs(persona_dir, exist_ok=True)
@@ -203,23 +204,24 @@ def main():
     
     selected_persona = st.sidebar.selectbox("테스터 유형을 선택하세요:", options)
     
-    # 버튼을 눌러야 로드되도록 변경 (실수 방지)
+    # 파일을 선택했을 때만 로드 버튼 표시
     if selected_persona != "직접 입력 (선택 안 함)":
         if st.sidebar.button("📂 선택한 페르소나 불러오기"):
             persona_history = load_persona_history(all_df, selected_persona)
             if persona_history:
                 st.session_state['history'] = persona_history
+                # 날짜 내림차순 정렬 (최신이 위로)
                 st.session_state['history'].sort(key=lambda x: x['days_ago'], reverse=True)
                 st.success(f"'{selected_persona}' 로드 완료! ({len(persona_history)}개 아이템)")
-                st.session_state.pop('last_results', None) # 결과 초기화
+                st.session_state.pop('last_results', None) # 기존 결과 초기화
                 st.rerun()
 
     st.sidebar.divider()
     
     # [2] 직접 추가 섹션
-    st.sidebar.subheader("2. 아이템 추가")
+    st.sidebar.subheader("2. 아이템 직접 추가")
     if ui_df.empty:
-        st.error("데이터 없음")
+        st.error("표시할 아이템 데이터가 없습니다.")
         return
 
     l1 = st.sidebar.selectbox("대분류", sorted(ui_df['L1'].unique()))
@@ -228,7 +230,7 @@ def main():
     
     sel_item = st.sidebar.selectbox("상품 선택", options=items.to_dict('records'), 
                                   format_func=lambda x: f"{x['Item_Name']} ({x['purchase_count']}회)")
-    days = st.sidebar.number_input("며칠 전?", 0, 365, 0)
+    days = st.sidebar.number_input("며칠 전 구매했나요?", 0, 365, 0)
     
     if st.sidebar.button("➕ 리스트에 추가"):
         st.session_state['history'].append({
@@ -237,6 +239,7 @@ def main():
             'days_ago': days
         })
         st.session_state['history'].sort(key=lambda x: x['days_ago'], reverse=True)
+        st.session_state.pop('last_results', None) # 결과 초기화
         st.rerun()
 
     if st.sidebar.button("🗑️ 전체 초기화"):
@@ -248,16 +251,15 @@ def main():
     st.subheader("📋 현재 시퀀스 (TimeLine)")
     
     if not st.session_state['history']:
-        st.info("좌측 사이드바에서 페르소나를 선택하거나 아이템을 추가해주세요.")
+        st.info("👈 좌측 사이드바에서 페르소나를 선택하거나, 아이템을 직접 추가해주세요.")
     else:
-        # [기능 추가] 시퀀스 목록 및 개별 삭제 기능
-        # 데이터프레임 대신 개별 항목을 나열하여 삭제 버튼 제공
-        
+        # [기능 추가] 시퀀스 목록 및 개별 삭제 기능 구현
         st.markdown("---")
+        # enumerate를 사용하여 인덱스를 확보 (삭제 시 필요)
         for i, item in enumerate(st.session_state['history']):
             col1, col2, col3 = st.columns([1, 6, 1])
             
-            # 시간 표시
+            # 시간 표시 텍스트
             if item['days_ago'] == 0:
                 time_str = "오늘"
             else:
@@ -268,8 +270,8 @@ def main():
             with col2:
                 st.write(f"**{item['name']}**")
             with col3:
-                # 삭제 버튼 (고유 키 필요)
-                if st.button("❌", key=f"del_{i}", help="이 아이템 삭제"):
+                # 삭제 버튼: 고유 key를 부여하여 충돌 방지
+                if st.button("❌", key=f"del_{i}", help="이 아이템만 삭제"):
                     st.session_state['history'].pop(i)
                     st.session_state.pop('last_results', None) # 결과 초기화
                     st.rerun()
@@ -278,9 +280,9 @@ def main():
         # 추론 버튼
         if st.button("🚀 추천 결과 비교 (Model A vs B)", type="primary"):
             if len(st.session_state['history']) < 2:
-                st.warning("아이템을 2개 이상 입력해주세요.")
+                st.warning("정확한 분석을 위해 아이템을 2개 이상 입력해주세요.")
             else:
-                with st.spinner("두 모델이 분석 중입니다..."):
+                with st.spinner("두 모델이 시퀀스를 분석 중입니다..."):
                     # --- 입력 데이터 준비 ---
                     t2i_tis = vocab_tis['token2id']
                     ids_tis, days_list = [], []
@@ -296,12 +298,13 @@ def main():
                             ids_sas.append(t2i_sas[h['item_id']])
 
                     if not ids_tis or not ids_sas:
-                        st.error("매핑 가능한 아이템이 없습니다.")
+                        st.error("매핑 가능한 아이템이 하나도 없습니다.")
                         st.stop()
 
                     # --- 추론 실행 ---
                     
                     # [Model A] SASRec
+                    # SASRec은 시간 정보 없이 아이템 시퀀스만 사용
                     seq_sas = ids_sas[-tis_maxlen:]
                     pad_len_sas = tis_maxlen - len(seq_sas)
                     input_sas = torch.LongTensor([[0]*pad_len_sas + seq_sas]).to(DEVICE)
@@ -316,12 +319,14 @@ def main():
                         topk_A_ids = topk_A_indices.tolist()
 
                     # [Model B] TiSASRec
+                    # TiSASRec은 아이템 시퀀스 + 시간 간격(Interval) 정보 사용
                     seq_tis = ids_tis[-tis_maxlen:]
                     d_seq = days_list[-tis_maxlen:]
                     pad_len_tis = tis_maxlen - len(seq_tis)
                     input_tis = torch.LongTensor([[0]*pad_len_tis + seq_tis]).to(DEVICE)
                     len_tis = torch.LongTensor([tis_maxlen]).to(DEVICE)
                     
+                    # 시간 매트릭스 계산 (utils.py 의존)
                     t_seq, t_mat = get_tisasrec_input(d_seq, tis_maxlen, tis_timespan)
                     
                     topk_B_ids = []
@@ -335,7 +340,7 @@ def main():
                         topk_B_indices = np.argsort(scores_B)[::-1][:10]
                         topk_B_ids = topk_B_indices.tolist()
 
-                    # --- 결과 저장 (순서 랜덤 섞기) ---
+                    # --- 결과 저장 (순서 랜덤 섞기: Blind Test) ---
                     results_list = [
                         {'ids': topk_A_ids, 'name': 'SASRec', 'type': 'A'},
                         {'ids': topk_B_ids, 'name': 'TiSASRec', 'type': 'B'}
