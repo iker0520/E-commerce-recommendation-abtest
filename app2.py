@@ -56,13 +56,20 @@ class MockDataset:
         return self.n_items
 
 def load_translations():
-    """번역 파일 로드 및 매핑 딕셔너리 생성"""
-    csv_path = 'data/translation_progress.csv'
+    """번역 파일 로드 및 매핑 딕셔너리 생성 (공백 제거 로직 추가)"""
+    csv_path = 'translation_progress.csv'
     if not os.path.exists(csv_path):
+        st.warning("⚠️ translation_progress.csv 파일을 찾을 수 없습니다.")
         return {}, {}, {}
     
     try:
+        # csv 로드
         df = pd.read_csv(csv_path)
+        
+        # [중요] 매핑 키와 값의 앞뒤 공백 제거 (데이터 불일치 방지)
+        df['Original_English'] = df['Original_English'].astype(str).str.strip()
+        df['Translated_Korean'] = df['Translated_Korean'].astype(str).str.strip()
+        
         # 1. 대분류 매핑
         l1_df = df[df['Category_Type'] == '대분류']
         l1_map = dict(zip(l1_df['Original_English'], l1_df['Translated_Korean']))
@@ -75,9 +82,12 @@ def load_translations():
         item_df = df[df['Category_Type'] == '선택']
         item_map = dict(zip(item_df['Original_English'], item_df['Translated_Korean']))
         
+        # [디버깅용] 데이터가 제대로 로드되었는지 확인 (로그는 터미널에 찍힘)
+        # print(f"Loaded {len(item_map)} item translations.")
+        
         return l1_map, l2_map, item_map
     except Exception as e:
-        st.warning(f"번역 파일 로드 중 오류 발생: {e}")
+        st.error(f"번역 파일 로드 중 오류 발생: {e}")
         return {}, {}, {}
 
 @st.cache_data
@@ -92,9 +102,16 @@ def load_data():
     # 2. 번역 데이터 적용
     l1_map, l2_map, item_map = load_translations()
     
-    # 매핑 적용 (매핑 없으면 원본 영문 유지)
+    # [중요] 비교를 위해 원본 데이터의 공백도 제거합니다.
+    all_df['L1'] = all_df['L1'].astype(str).str.strip()
+    all_df['L2'] = all_df['L2'].astype(str).str.strip()
+    all_df['Item_Name'] = all_df['Item_Name'].astype(str).str.strip()
+
+    # 매핑 적용 (번역이 없으면 영문 유지)
     all_df['L1_KR'] = all_df['L1'].map(l1_map).fillna(all_df['L1'])
     all_df['L2_KR'] = all_df['L2'].map(l2_map).fillna(all_df['L2'])
+    
+    # 상품명 매핑 - fillna로 영문명 유지
     all_df['Item_Name_KR'] = all_df['Item_Name'].map(item_map).fillna(all_df['Item_Name'])
 
     # 3. 매핑 데이터 (단일 파일 사용)
@@ -104,7 +121,6 @@ def load_data():
         token2id = vocab['token2id']
         id2token = vocab['id2token']
         
-        # 딕셔너리 변환 (안전장치)
         if not isinstance(id2token, dict):
             id2token = {i: str(token) for i, token in enumerate(id2token)}
     except Exception as e:
@@ -283,8 +299,8 @@ def main():
     st.subheader("📋 이커머스 상품 구매 내역")
     
     if not st.session_state['history']:
-        st.info("테스터님이 직접 구매 히스토리를 구성하면, 구매주기를 고려한 추천과 그렇지 않은 추천 결과가 제공됩니다. \n" +
-                "최대한 본인의 실제 구매패턴을 기반으로 시퀀스를 자유롭게 작성해주세요! \n" +
+        st.info("테스터님이 직접 구매 히스토리를 구성하면, 구매주기를 고려한 추천과 그렇지 않은 추천 결과가 제공됩니다. \n\n" +
+                "최대한 본인의 실제 구매패턴을 기반으로 시퀀스를 자유롭게 작성해주세요! \n\n" +
                 "왼쪽 사이드바에서 특정 페르소나를 불러오거나, 직접 아이템을 추가할 수 있습니다.")
     else:
         # 시퀀스 목록 + 삭제 버튼
