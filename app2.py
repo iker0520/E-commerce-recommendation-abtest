@@ -55,6 +55,31 @@ class MockDataset:
     def num(self, field):
         return self.n_items
 
+def load_translations():
+    """번역 파일 로드 및 매핑 딕셔너리 생성"""
+    csv_path = 'data/translation_progress.csv'
+    if not os.path.exists(csv_path):
+        return {}, {}, {}
+    
+    try:
+        df = pd.read_csv(csv_path)
+        # 1. 대분류 매핑
+        l1_df = df[df['Category_Type'] == '대분류']
+        l1_map = dict(zip(l1_df['Original_English'], l1_df['Translated_Korean']))
+        
+        # 2. 중분류 매핑
+        l2_df = df[df['Category_Type'] == '중분류']
+        l2_map = dict(zip(l2_df['Original_English'], l2_df['Translated_Korean']))
+        
+        # 3. 상품명 매핑 (Category_Type이 '선택'인 것들)
+        item_df = df[df['Category_Type'] == '선택']
+        item_map = dict(zip(item_df['Original_English'], item_df['Translated_Korean']))
+        
+        return l1_map, l2_map, item_map
+    except Exception as e:
+        st.warning(f"번역 파일 로드 중 오류 발생: {e}")
+        return {}, {}, {}
+
 @st.cache_data
 def load_data():
     # 1. 메타 데이터
@@ -64,7 +89,15 @@ def load_data():
         st.error("data/meta_lookup.pkl 파일이 없습니다.")
         return None, None, None
 
-    # 2. 매핑 데이터 (단일 파일 사용)
+    # 2. 번역 데이터 적용
+    l1_map, l2_map, item_map = load_translations()
+    
+    # 매핑 적용 (매핑 없으면 원본 영문 유지)
+    all_df['L1_KR'] = all_df['L1'].map(l1_map).fillna(all_df['L1'])
+    all_df['L2_KR'] = all_df['L2'].map(l2_map).fillna(all_df['L2'])
+    all_df['Item_Name_KR'] = all_df['Item_Name'].map(item_map).fillna(all_df['Item_Name'])
+
+    # 3. 매핑 데이터 (단일 파일 사용)
     try:
         with open("data/recbole_vocab.pkl", "rb") as f:
             vocab = pickle.load(f)
@@ -129,17 +162,20 @@ def load_persona_history(all_df, filename):
             days_match = re.search(r'\d+', days_str)
             days = int(days_match.group()) if days_match else 0
             
-            item_name = row.get('상품 선택') or row.get('name')
-            if not item_name: continue
+            # CSV에는 영문 이름이 있을 수 있으므로 Item_Name으로 먼저 찾음
+            item_name_raw = row.get('상품 선택') or row.get('name')
+            if not item_name_raw: continue
 
-            # meta_df에서 이름 매칭
-            matched_row = all_df[all_df['Item_Name'] == item_name]
+            # meta_df에서 이름 매칭 (영문명 기준 매칭)
+            matched_row = all_df[all_df['Item_Name'] == item_name_raw]
             
             if not matched_row.empty:
                 item_id = str(matched_row.iloc[0]['item_id'])
+                # 화면 표시는 한글명 사용
+                item_name_kr = matched_row.iloc[0]['Item_Name_KR']
                 history.append({
                     'item_id': item_id,
-                    'name': item_name,
+                    'name': item_name_kr,
                     'days_ago': days
                 })
             else:
@@ -167,9 +203,9 @@ def check_cycle_filtering(days_ago, cycle_info):
 # ------------------------------------------------------------------
 def main():
     st.set_page_config(layout="wide", page_title="Recommendation Rule A/B Test")
-    st.title("🛍️ 쇼핑 패턴 기반 추천 Rule A/B Test")
+    st.title("🛍️ 쇼핑 패턴 기반 추천 알고리즘 A/B Test")
 
-    # [원복됨] 기존처럼 3개만 깔끔하게 받습니다.
+    # 데이터 로드 (한글 매핑 포함)
     all_df, token2id, id2token = load_data()
     if all_df is None: return
     
@@ -211,18 +247,27 @@ def main():
     # [2] 직접 추가
     st.sidebar.subheader("2. 아이템 추가")
     if not ui_df.empty:
-        l1 = st.sidebar.selectbox("대분류", sorted(ui_df['L1'].unique()))
-        l2 = st.sidebar.selectbox("중분류", sorted(ui_df[ui_df['L1']==l1]['L2'].unique()))
-        items = ui_df[(ui_df['L1']==l1) & (ui_df['L2']==l2)].sort_values(by='purchase_count', ascending=False)
+        # 한글 대분류 사용
+        l1_list = sorted(ui_df['L1_KR'].unique())
+        l1 = st.sidebar.selectbox("대분류", l1_list)
         
+        # 선택된 한글 대분류에 해당하는 중분류(한글) 필터링
+        l1_mask = ui_df['L1_KR'] == l1
+        l2_list = sorted(ui_df[l1_mask]['L2_KR'].unique())
+        l2 = st.sidebar.selectbox("중분류", l2_list)
+        
+        # 선택된 중분류에 해당하는 상품(한글명 포함) 필터링
+        items = ui_df[l1_mask & (ui_df['L2_KR'] == l2)].sort_values(by='purchase_count', ascending=False)
+        
+        # selectbox에서 객체 자체를 선택하되, 보여주는건 format_func로 제어
         sel_item = st.sidebar.selectbox("상품 선택", options=items.to_dict('records'), 
-                                      format_func=lambda x: f"{x['Item_Name']} ({x['purchase_count']}회)")
+                                      format_func=lambda x: f"{x['Item_Name_KR']} ({x['purchase_count']}회)")
         days = st.sidebar.number_input("며칠 전 구매?", 0, 365, 0)
         
         if st.sidebar.button("➕ 리스트에 추가"):
             st.session_state['history'].append({
                 'item_id': str(sel_item['item_id']),
-                'name': sel_item['Item_Name'],
+                'name': sel_item['Item_Name_KR'], # 한글 이름 저장
                 'days_ago': days
             })
             st.session_state['history'].sort(key=lambda x: x['days_ago'], reverse=True)
@@ -235,11 +280,12 @@ def main():
         st.rerun()
 
     # --- Main: 시퀀스 확인 ---
-    st.subheader("📋 상품 구매 내역")
-    st.write("테스터분의 실제 구매패턴을 기반으로 시퀀스를 자유롭게 구성해주세요!")
+    st.subheader("📋 이커머스 상품 구매 내역")
     
     if not st.session_state['history']:
-        st.info("좌측 사이드바에서 페르소나를 선택하거나 아이템을 추가해주세요.")
+        st.info("테스터님이 직접 구매 히스토리를 구성하면, 구매주기를 고려한 추천과 그렇지 않은 추천 결과가 제공됩니다. \n" +
+                "최대한 본인의 실제 구매패턴을 기반으로 시퀀스를 자유롭게 작성해주세요! \n" +
+                "왼쪽 사이드바에서 특정 페르소나를 불러오거나, 직접 아이템을 추가할 수 있습니다.")
     else:
         # 시퀀스 목록 + 삭제 버튼
         st.markdown("---")
@@ -265,7 +311,7 @@ def main():
         # ------------------------------------------------------------------
         # 추론 버튼
         # ------------------------------------------------------------------
-        if st.button("🚀 추천 결과 생성 (Logic A vs B)", type="primary"):
+        if st.button("🚀 추천 결과 생성", type="primary"):
             if len(st.session_state['history']) < 2:
                 st.warning("아이템을 2개 이상 넣어주세요.")
             else:
@@ -343,21 +389,21 @@ def main():
         mapping = st.session_state['ab_mapping']
         
         if mapping == 'A_is_1':
-            opt1_ids, opt1_name = topk_A_ids, "Logic A (부스팅 Only)"
-            opt2_ids, opt2_name = topk_B_ids, "Logic B (부스팅 + 필터링)"
+            opt1_ids, opt1_name = topk_A_ids, "Logic A (구매주기 고려 x)"
+            opt2_ids, opt2_name = topk_B_ids, "Logic B (구매주기 고려 o (필터링))"
         else:
-            opt1_ids, opt1_name = topk_B_ids, "Logic B (부스팅 + 필터링)"
-            opt2_ids, opt2_name = topk_A_ids, "Logic A (부스팅 Only)"
+            opt1_ids, opt1_name = topk_B_ids, "Logic B (구매주기 고려 o (필터링))"
+            opt2_ids, opt2_name = topk_A_ids, "Logic A (구매주기 고려 x)"
 
-        # Helper
+        # Helper - 한글 정보 표시로 변경
         def get_simple_info(idx):
             name, cat = "Unknown", ""
             if idx in id2token:
                 raw_id = id2token[idx]
                 row = all_df[all_df['item_id'].astype(str) == raw_id]
                 if not row.empty:
-                    name = row.iloc[0]['Item_Name']
-                    cat = row.iloc[0]['L2']
+                    name = row.iloc[0]['Item_Name_KR'] # 한글 이름
+                    cat = row.iloc[0]['L2_KR'] # 한글 중분류
             return f"[{cat}] {name}"
 
         # --- 화면 출력 ---
