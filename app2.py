@@ -56,34 +56,24 @@ class MockDataset:
         return self.n_items
 
 def load_translations():
-    """번역 파일 로드 및 매핑 딕셔너리 생성 (공백 제거 로직 추가)"""
+    """번역 파일 로드 및 매핑 딕셔너리 생성"""
     csv_path = './data/translation_progress.csv'
     if not os.path.exists(csv_path):
-        st.warning("⚠️ translation_progress.csv 파일을 찾을 수 없습니다.")
         return {}, {}, {}
     
     try:
-        # csv 로드
         df = pd.read_csv(csv_path)
-        
-        # [중요] 매핑 키와 값의 앞뒤 공백 제거 (데이터 불일치 방지)
         df['Original_English'] = df['Original_English'].astype(str).str.strip()
         df['Translated_Korean'] = df['Translated_Korean'].astype(str).str.strip()
         
-        # 1. 대분류 매핑
         l1_df = df[df['Category_Type'] == '대분류']
         l1_map = dict(zip(l1_df['Original_English'], l1_df['Translated_Korean']))
         
-        # 2. 중분류 매핑
         l2_df = df[df['Category_Type'] == '중분류']
         l2_map = dict(zip(l2_df['Original_English'], l2_df['Translated_Korean']))
         
-        # 3. 상품명 매핑 (Category_Type이 '선택'인 것들)
         item_df = df[df['Category_Type'] == '선택']
         item_map = dict(zip(item_df['Original_English'], item_df['Translated_Korean']))
-        
-        # [디버깅용] 데이터가 제대로 로드되었는지 확인 (로그는 터미널에 찍힘)
-        # print(f"Loaded {len(item_map)} item translations.")
         
         return l1_map, l2_map, item_map
     except Exception as e:
@@ -102,19 +92,15 @@ def load_data():
     # 2. 번역 데이터 적용
     l1_map, l2_map, item_map = load_translations()
     
-    # [중요] 비교를 위해 원본 데이터의 공백도 제거합니다.
     all_df['L1'] = all_df['L1'].astype(str).str.strip()
     all_df['L2'] = all_df['L2'].astype(str).str.strip()
     all_df['Item_Name'] = all_df['Item_Name'].astype(str).str.strip()
 
-    # 매핑 적용 (번역이 없으면 영문 유지)
     all_df['L1_KR'] = all_df['L1'].map(l1_map).fillna(all_df['L1'])
     all_df['L2_KR'] = all_df['L2'].map(l2_map).fillna(all_df['L2'])
-    
-    # 상품명 매핑 - fillna로 영문명 유지
     all_df['Item_Name_KR'] = all_df['Item_Name'].map(item_map).fillna(all_df['Item_Name'])
 
-    # 3. 매핑 데이터 (단일 파일 사용)
+    # 3. 매핑 데이터
     try:
         with open("data/recbole_vocab.pkl", "rb") as f:
             vocab = pickle.load(f)
@@ -147,8 +133,6 @@ def load_models():
         sas_model = SASRec(checkpoint['config'], MockDataset(sas_n_items)).to(DEVICE)
         sas_model.load_state_dict(checkpoint['state_dict'])
         sas_model.eval()
-        
-        # 모델의 maxlen 가져오기
         maxlen = checkpoint['config']['MAX_ITEM_LIST_LENGTH']
     except Exception as e:
         st.warning(f"SASRec 로드 실패: {e}")
@@ -160,6 +144,7 @@ def load_models():
 # 3. 페르소나 데이터 로드 함수
 # ------------------------------------------------------------------
 def load_persona_history(all_df, filename):
+    # data/personas 폴더 경로 사용
     persona_path = os.path.join('data', 'personas', filename)
     
     if not os.path.exists(persona_path):
@@ -178,16 +163,13 @@ def load_persona_history(all_df, filename):
             days_match = re.search(r'\d+', days_str)
             days = int(days_match.group()) if days_match else 0
             
-            # CSV에는 영문 이름이 있을 수 있으므로 Item_Name으로 먼저 찾음
             item_name_raw = row.get('상품 선택') or row.get('name')
             if not item_name_raw: continue
 
-            # meta_df에서 이름 매칭 (영문명 기준 매칭)
             matched_row = all_df[all_df['Item_Name'] == item_name_raw]
             
             if not matched_row.empty:
                 item_id = str(matched_row.iloc[0]['item_id'])
-                # 화면 표시는 한글명 사용
                 item_name_kr = matched_row.iloc[0]['Item_Name_KR']
                 history.append({
                     'item_id': item_id,
@@ -195,7 +177,7 @@ def load_persona_history(all_df, filename):
                     'days_ago': days
                 })
             else:
-                pass # 매핑 실패는 무시
+                pass 
                 
         return history
     except Exception as e:
@@ -221,14 +203,12 @@ def main():
     st.set_page_config(layout="wide", page_title="Recommendation Rule A/B Test")
     st.title("🛍️ 쇼핑 패턴 기반 추천 알고리즘 A/B Test")
 
-    # 데이터 로드 (한글 매핑 포함)
     all_df, token2id, id2token = load_data()
     if all_df is None: return
     
     cycle_data = load_cycle_data()
     sas_model, safe_n_items, maxlen = load_models()
 
-    # UI 필터링
     valid_tokens = [t for t, i in token2id.items() if i < safe_n_items]
     ui_df = all_df[all_df['item_id'].astype(str).isin(valid_tokens) & (all_df['purchase_count'] >= 10)].copy()
 
@@ -245,7 +225,12 @@ def main():
     persona_files = [f for f in os.listdir(persona_dir) if f.endswith('.csv')]
     options = ["직접 입력 (선택 안 함)"] + persona_files
     
-    selected_persona = st.sidebar.selectbox("테스터 유형을 선택하세요:", options)
+    # [설정] .csv 확장자 제거
+    selected_persona = st.sidebar.selectbox(
+        "테스터 유형을 선택하세요:", 
+        options,
+        format_func=lambda x: x.replace(".csv", "") if x != "직접 입력 (선택 안 함)" else x
+    )
     
     if selected_persona != "직접 입력 (선택 안 함)":
         if st.sidebar.button("📂 선택한 페르소나 불러오기"):
@@ -253,7 +238,7 @@ def main():
             if persona_history:
                 st.session_state['history'] = persona_history
                 st.session_state['history'].sort(key=lambda x: x['days_ago'], reverse=True)
-                st.success(f"'{selected_persona}' 로드 완료!")
+                st.success(f"'{selected_persona.replace('.csv','')}' 로드 완료!")
                 st.session_state.pop('raw_scores', None)
                 st.session_state.pop('ab_mapping', None)
                 st.rerun()
@@ -263,27 +248,28 @@ def main():
     # [2] 직접 추가
     st.sidebar.subheader("2. 아이템 추가")
     if not ui_df.empty:
-        # 한글 대분류 사용
         l1_list = sorted(ui_df['L1_KR'].unique())
         l1 = st.sidebar.selectbox("대분류", l1_list)
         
-        # 선택된 한글 대분류에 해당하는 중분류(한글) 필터링
         l1_mask = ui_df['L1_KR'] == l1
         l2_list = sorted(ui_df[l1_mask]['L2_KR'].unique())
         l2 = st.sidebar.selectbox("중분류", l2_list)
         
-        # 선택된 중분류에 해당하는 상품(한글명 포함) 필터링
         items = ui_df[l1_mask & (ui_df['L2_KR'] == l2)].sort_values(by='purchase_count', ascending=False)
         
-        # selectbox에서 객체 자체를 선택하되, 보여주는건 format_func로 제어
-        sel_item = st.sidebar.selectbox("상품 선택", options=items.to_dict('records'), 
-                                      format_func=lambda x: f"{x['Item_Name_KR']} ({x['purchase_count']}회)")
+        # [설정] 구매횟수 제거, 상품명만 표시
+        sel_item = st.sidebar.selectbox(
+            "상품 선택", 
+            options=items.to_dict('records'), 
+            format_func=lambda x: x['Item_Name_KR']
+        )
+
         days = st.sidebar.number_input("며칠 전 구매?", 0, 365, 0)
         
         if st.sidebar.button("➕ 리스트에 추가"):
             st.session_state['history'].append({
                 'item_id': str(sel_item['item_id']),
-                'name': sel_item['Item_Name_KR'], # 한글 이름 저장
+                'name': sel_item['Item_Name_KR'],
                 'days_ago': days
             })
             st.session_state['history'].sort(key=lambda x: x['days_ago'], reverse=True)
@@ -299,11 +285,14 @@ def main():
     st.subheader("📋 이커머스 상품 구매 내역")
     
     if not st.session_state['history']:
-        st.info("테스터님이 직접 구매 히스토리를 구성하면, 구매주기를 고려한 추천과 그렇지 않은 추천 결과가 제공됩니다. \n\n" +
-                "최대한 본인의 실제 구매패턴을 기반으로 시퀀스를 자유롭게 작성해주세요! \n\n" +
-                "왼쪽 사이드바에서 특정 페르소나를 불러오거나, 직접 아이템을 추가할 수 있습니다.")
+        st.info("""
+        테스터님이 직접 구매 히스토리를 구성하면, 구매주기를 고려한 추천과 그렇지 않은 추천 결과가 제공됩니다.
+
+        최대한 본인의 실제 구매패턴을 기반으로 시퀀스를 자유롭게 작성해주세요!
+
+        왼쪽 사이드바에서 특정 페르소나를 불러오거나, 직접 아이템을 추가할 수 있습니다.
+        """)
     else:
-        # 시퀀스 목록 + 삭제 버튼
         st.markdown("---")
         for i, item in enumerate(st.session_state['history']):
             col1, col2, col3 = st.columns([1, 6, 1])
@@ -312,17 +301,16 @@ def main():
             with col1: st.caption(time_str)
             with col2: st.write(f"**{item['name']}**")
             with col3:
+                # 개별 삭제 기능
                 if st.button("❌", key=f"del_{i}"):
                     st.session_state['history'].pop(i)
-                    # 시퀀스 변경 시 결과도 초기화
                     st.session_state.pop('raw_scores', None) 
                     st.session_state.pop('ab_mapping', None)
                     st.rerun()
         st.markdown("---")
     
-        st.sidebar.markdown("---")
-        st.sidebar.header("🎛️ 파라미터 튜닝")
-        alpha = st.sidebar.slider("재구매 가중치 (Alpha)", 0.0, 10.0, 2.0, 0.1)
+        # [설정] alpha 슬라이더 제거 및 고정값 설정
+        alpha = 2.0 
         
         # ------------------------------------------------------------------
         # 추론 버튼
@@ -332,11 +320,9 @@ def main():
                 st.warning("아이템을 2개 이상 넣어주세요.")
             else:
                 with st.spinner("AI 분석 중..."):
-                    # [핵심] 버튼 누를 때마다 매핑(좌우 배치) 랜덤 재설정
                     if 'ab_mapping' in st.session_state:
                         del st.session_state['ab_mapping']
                     
-                    # 1. 입력 변환
                     hist_ids = []
                     for h in st.session_state['history']:
                         if h['item_id'] in token2id:
@@ -346,13 +332,12 @@ def main():
                     
                     if not hist_ids: st.stop()
                         
-                    # 2. SASRec 추론
                     seq_ids = hist_ids[-maxlen:]
                     pad_len = maxlen - len(seq_ids)
                     input_ids = [0] * pad_len + seq_ids
                     
                     item_seq = torch.LongTensor([input_ids]).to(DEVICE)
-                    item_len = torch.LongTensor([maxlen]).to(DEVICE) # 길이 고정
+                    item_len = torch.LongTensor([maxlen]).to(DEVICE)
 
                     if sas_model:
                         inter_sas = Interaction({'item_id_list': item_seq, 'item_length': item_len})
@@ -368,7 +353,7 @@ def main():
     if st.session_state.get('has_run', False) and 'raw_scores' in st.session_state:
         raw_scores = st.session_state['raw_scores']
         
-        # --- Logic A: History Boost ---
+        # --- Logic A: History Boost (구매이력 부스팅) ---
         scores_A = raw_scores.copy()
         item_counts = {}
         for h in st.session_state['history']:
@@ -383,7 +368,7 @@ def main():
 
         topk_A_ids = np.argsort(scores_A)[::-1][:10]
 
-        # --- Logic B: Cycle Filtering ---
+        # --- Logic B: Cycle Filtering (구매주기 필터링) ---
         scores_B = scores_A.copy()
         
         for h in st.session_state['history']:
@@ -398,7 +383,7 @@ def main():
         
         topk_B_ids = np.argsort(scores_B)[::-1][:10]
 
-        # --- [핵심] 랜덤 매핑 로직 ---
+        # --- 매핑 로직 ---
         if 'ab_mapping' not in st.session_state:
             st.session_state['ab_mapping'] = random.choice(['A_is_1', 'B_is_1'])
 
@@ -411,18 +396,16 @@ def main():
             opt1_ids, opt1_name = topk_B_ids, "Logic B (구매주기 고려 o (필터링))"
             opt2_ids, opt2_name = topk_A_ids, "Logic A (구매주기 고려 x)"
 
-        # Helper - 한글 정보 표시로 변경
         def get_simple_info(idx):
             name, cat = "Unknown", ""
             if idx in id2token:
                 raw_id = id2token[idx]
                 row = all_df[all_df['item_id'].astype(str) == raw_id]
                 if not row.empty:
-                    name = row.iloc[0]['Item_Name_KR'] # 한글 이름
-                    cat = row.iloc[0]['L2_KR'] # 한글 중분류
+                    name = row.iloc[0]['Item_Name_KR']
+                    cat = row.iloc[0]['L2_KR']
             return f"[{cat}] {name}"
 
-        # --- 화면 출력 ---
         st.divider()
         st.subheader("⚖️ 블라인드 테스트: 더 만족스러운 추천은?")
         
@@ -439,7 +422,6 @@ def main():
                 if idx == 0: continue
                 st.write(f"{rank+1}. {get_simple_info(idx)}")
 
-        # --- 설문 폼 ---
         st.markdown("---")
         with st.form("ab_test_form"):
             st.write("📝 **평가 입력**")
@@ -450,7 +432,6 @@ def main():
                 st.session_state['experiment_submitted'] = True
                 st.session_state['user_choice'] = choice
                 
-                # 저장 로직 (로컬 CSV)
                 log_data = {
                     "timestamp": pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S'),
                     "user_choice": choice,
@@ -471,7 +452,9 @@ def main():
                 except Exception as e:
                     st.error(f"저장 실패: {e}")
 
-        # --- 결과 공개 ---
+        # ------------------------------------------------------------------
+        # 결과 공개 및 색상 강조
+        # ------------------------------------------------------------------
         if st.session_state.get('experiment_submitted', False):
             st.divider()
             st.header("🔓 결과 공개")
@@ -482,17 +465,51 @@ def main():
             st.success(f"당신의 선택: **{user_pick}**")
             st.info(f"실제 로직: **{real_logic}**")
             
+            # 비교를 위한 집합 생성
+            set_A = set(topk_A_ids)
+            set_B = set(topk_B_ids)
+
             rc1, rc2 = st.columns(2)
+            
+            # Option 1 렌더링
             with rc1:
                 st.markdown(f"### {opt1_name}")
                 for rank, idx in enumerate(opt1_ids):
-                    if idx==0: continue
-                    st.caption(f"{rank+1}. {get_simple_info(idx)}")
+                    if idx == 0: continue
+                    info = get_simple_info(idx)
+                    
+                    if opt1_name.startswith("Logic A"):
+                        # Logic A 목록: Logic B에 없는 아이템 (사라짐) -> 주황색
+                        if idx not in set_B:
+                            st.markdown(f":orange[{rank+1}. {info}]")
+                        else:
+                            st.write(f"{rank+1}. {info}")
+                    else:
+                        # Logic B 목록: Logic A에 없는 아이템 (새로 등장) -> 초록색
+                        if idx not in set_A:
+                            st.markdown(f":green[{rank+1}. {info}]")
+                        else:
+                            st.write(f"{rank+1}. {info}")
+
+            # Option 2 렌더링
             with rc2:
                 st.markdown(f"### {opt2_name}")
                 for rank, idx in enumerate(opt2_ids):
-                    if idx==0: continue
-                    st.caption(f"{rank+1}. {get_simple_info(idx)}")
+                    if idx == 0: continue
+                    info = get_simple_info(idx)
+                    
+                    if opt2_name.startswith("Logic A"):
+                        # Logic A 목록: Logic B에 없는 아이템 (사라짐) -> 주황색
+                        if idx not in set_B:
+                            st.markdown(f":orange[{rank+1}. {info}]")
+                        else:
+                            st.write(f"{rank+1}. {info}")
+                    else:
+                        # Logic B 목록: Logic A에 없는 아이템 (새로 등장) -> 초록색
+                        if idx not in set_A:
+                            st.markdown(f":green[{rank+1}. {info}]")
+                        else:
+                            st.write(f"{rank+1}. {info}")
 
 if __name__ == "__main__":
     main()
