@@ -144,7 +144,6 @@ def load_models():
 # 3. 페르소나 데이터 로드 함수
 # ------------------------------------------------------------------
 def load_persona_history(all_df, filename):
-    # data/personas 폴더 경로 사용
     persona_path = os.path.join('data', 'personas', filename)
     
     if not os.path.exists(persona_path):
@@ -225,7 +224,7 @@ def main():
     persona_files = [f for f in os.listdir(persona_dir) if f.endswith('.csv')]
     options = ["직접 입력 (선택 안 함)"] + persona_files
     
-    # [설정] .csv 확장자 제거
+    # .csv 제거
     selected_persona = st.sidebar.selectbox(
         "테스터 유형을 선택하세요:", 
         options,
@@ -257,7 +256,7 @@ def main():
         
         items = ui_df[l1_mask & (ui_df['L2_KR'] == l2)].sort_values(by='purchase_count', ascending=False)
         
-        # [설정] 구매횟수 제거, 상품명만 표시
+        # 구매횟수 제거, 상품명만 표시
         sel_item = st.sidebar.selectbox(
             "상품 선택", 
             options=items.to_dict('records'), 
@@ -309,7 +308,7 @@ def main():
                     st.rerun()
         st.markdown("---")
     
-        # [설정] alpha 슬라이더 제거 및 고정값 설정
+        # alpha 고정
         alpha = 2.0 
         
         # ------------------------------------------------------------------
@@ -353,7 +352,7 @@ def main():
     if st.session_state.get('has_run', False) and 'raw_scores' in st.session_state:
         raw_scores = st.session_state['raw_scores']
         
-        # --- Logic A: History Boost (구매이력 부스팅) ---
+        # --- Logic A: History Boost ---
         scores_A = raw_scores.copy()
         item_counts = {}
         for h in st.session_state['history']:
@@ -368,7 +367,7 @@ def main():
 
         topk_A_ids = np.argsort(scores_A)[::-1][:10]
 
-        # --- Logic B: Cycle Filtering (구매주기 필터링) ---
+        # --- Logic B: Cycle Filtering ---
         scores_B = scores_A.copy()
         
         for h in st.session_state['history']:
@@ -469,47 +468,50 @@ def main():
             set_A = set(topk_A_ids)
             set_B = set(topk_B_ids)
 
+            # [New] 구매 이력 조회용 딕셔너리 생성 (item_id -> 가장 최근 days_ago)
+            history_last_days = {}
+            for h in st.session_state['history']:
+                rid = str(h['item_id'])
+                d = h['days_ago']
+                # 같은 아이템이 여러 번 있을 경우 가장 최근(작은 숫자) 저장
+                if rid not in history_last_days or d < history_last_days[rid]:
+                    history_last_days[rid] = d
+
             rc1, rc2 = st.columns(2)
             
-            # Option 1 렌더링
-            with rc1:
-                st.markdown(f"### {opt1_name}")
-                for rank, idx in enumerate(opt1_ids):
-                    if idx == 0: continue
-                    info = get_simple_info(idx)
-                    
-                    if opt1_name.startswith("Logic A"):
-                        # Logic A 목록: Logic B에 없는 아이템 (사라짐) -> 주황색
-                        if idx not in set_B:
-                            st.markdown(f":orange[{rank+1}. {info}]")
+            # zip으로 중복 코드 통합
+            for col, ids, name in zip([rc1, rc2], [opt1_ids, opt2_ids], [opt1_name, opt2_name]):
+                with col:
+                    st.markdown(f"### {name}")
+                    for rank, idx in enumerate(ids):
+                        if idx == 0: continue
+                        
+                        info = get_simple_info(idx)
+                        
+                        # [New] 구매 이력 확인 및 텍스트 추가
+                        raw_id = id2token.get(idx, None)
+                        # [수정 후: 신규 상품 태그 추가]
+                        if raw_id and str(raw_id) in history_last_days:
+                            last_day = history_last_days[str(raw_id)]
+                            day_str = "오늘" if last_day == 0 else f"{last_day}일 전"
+                            info += f" **(↻ {day_str} 구매)**"
                         else:
-                            st.write(f"{rank+1}. {info}")
-                    else:
-                        # Logic B 목록: Logic A에 없는 아이템 (새로 등장) -> 초록색
-                        if idx not in set_A:
-                            st.markdown(f":green[{rank+1}. {info}]")
-                        else:
-                            st.write(f"{rank+1}. {info}")
+                        # 구매 기록이 없는 경우
+                            info += " **(✨ 신규 추천)**"
+                        
 
-            # Option 2 렌더링
-            with rc2:
-                st.markdown(f"### {opt2_name}")
-                for rank, idx in enumerate(opt2_ids):
-                    if idx == 0: continue
-                    info = get_simple_info(idx)
-                    
-                    if opt2_name.startswith("Logic A"):
-                        # Logic A 목록: Logic B에 없는 아이템 (사라짐) -> 주황색
-                        if idx not in set_B:
-                            st.markdown(f":orange[{rank+1}. {info}]")
+                        if name.startswith("Logic A"):
+                            # Logic A 목록: Logic B에 없는 아이템 (사라짐) -> 주황색
+                            if idx not in set_B:
+                                st.markdown(f":orange[{rank+1}. {info}]")
+                            else:
+                                st.write(f"{rank+1}. {info}")
                         else:
-                            st.write(f"{rank+1}. {info}")
-                    else:
-                        # Logic B 목록: Logic A에 없는 아이템 (새로 등장) -> 초록색
-                        if idx not in set_A:
-                            st.markdown(f":green[{rank+1}. {info}]")
-                        else:
-                            st.write(f"{rank+1}. {info}")
+                            # Logic B 목록: Logic A에 없는 아이템 (새로 등장) -> 초록색
+                            if idx not in set_A:
+                                st.markdown(f":green[{rank+1}. {info}]")
+                            else:
+                                st.write(f"{rank+1}. {info}")
 
 if __name__ == "__main__":
     main()
