@@ -235,7 +235,8 @@ def main():
         st.rerun()
 
     # --- Main: 시퀀스 확인 ---
-    st.subheader("📋 현재 구매 시퀀스")
+    st.subheader("📋 상품 구매 내역")
+    st.write("테스터분의 실제 구매패턴을 기반으로 시퀀스를 자유롭게 구성해주세요!")
     
     if not st.session_state['history']:
         st.info("좌측 사이드바에서 페르소나를 선택하거나 아이템을 추가해주세요.")
