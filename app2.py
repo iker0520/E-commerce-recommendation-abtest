@@ -291,7 +291,7 @@ def main():
         """)
     
     if not st.session_state['history']:
-        st.info("""
+        st.write("""
         시퀀스를 입력해주세요.
         """)
     else:
