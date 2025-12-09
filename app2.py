@@ -282,14 +282,17 @@ def main():
 
     # --- Main: 시퀀스 확인 ---
     st.subheader("📋 이커머스 상품 구매 내역")
-    
-    if not st.session_state['history']:
-        st.info("""
+    st.info("""
         테스터님이 직접 구매 히스토리를 구성하면, 구매주기를 고려한 추천과 그렇지 않은 추천 결과가 제공됩니다.
 
         최대한 본인의 실제 구매패턴을 기반으로 시퀀스를 자유롭게 작성해주세요!
 
         왼쪽 사이드바에서 특정 페르소나를 불러오거나, 직접 아이템을 추가할 수 있습니다.
+        """)
+    
+    if not st.session_state['history']:
+        st.info("""
+        시퀀스를 입력해주세요.
         """)
     else:
         st.markdown("---")
