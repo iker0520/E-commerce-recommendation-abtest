@@ -10,7 +10,7 @@ import re
 import glob
 
 # ------------------------------------------------------------------
-# 1. [필수] 모듈 경로 및 라이브러리 가짜 등록 (기존 유지)
+# 1. [필수] 모듈 경로 및 라이브러리 가짜 등록 (에러 방지)
 # ------------------------------------------------------------------
 import tisasrec_local
 sys.modules['TiSASRec'] = tisasrec_local
@@ -45,9 +45,7 @@ if not hasattr(recbole.utils, 'enum_type'):
 # 2. 데이터 및 모델 로드
 # ------------------------------------------------------------------
 from recbole.model.sequential_recommender.sasrec import SASRec
-from tisasrec_local import TiSASRec
 from recbole.data.interaction import Interaction
-from utils import get_tisasrec_input
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -59,71 +57,60 @@ class MockDataset:
 
 @st.cache_data
 def load_data():
+    # 1. 메타 데이터
     try:
         all_df = pd.read_pickle('data/meta_lookup.pkl')
     except:
         st.error("data/meta_lookup.pkl 파일이 없습니다.")
         return None, None, None
 
+    # 2. 매핑 데이터 (단일 파일 사용)
     try:
         with open("data/recbole_vocab.pkl", "rb") as f:
-            vocab_tis = pickle.load(f)
-        if not isinstance(vocab_tis['id2token'], dict):
-            vocab_tis['id2token'] = {i: str(t) for i, t in enumerate(vocab_tis['id2token'])}
-    except:
-        st.error("recbole_vocab.pkl (TiSASRec용) 없음")
-        return None, None, None, None, None
-
-    try:
-        with open("data/sasrec_vocab.pkl", "rb") as f:
-            vocab_sas = pickle.load(f)
-        if not isinstance(vocab_sas['id2token'], dict):
-            vocab_sas['id2token'] = {i: str(t) for i, t in enumerate(vocab_sas['id2token'])}
-    except:
-        st.error("sasrec_vocab.pkl (SASRec용) 없음")
-        return None, None, None, None, None
+            vocab = pickle.load(f)
+        token2id = vocab['token2id']
+        id2token = vocab['id2token']
         
-    return all_df, vocab_tis, vocab_sas
+        # 딕셔너리 변환 (안전장치)
+        if not isinstance(id2token, dict):
+            id2token = {i: str(token) for i, token in enumerate(id2token)}
+    except Exception as e:
+        st.error(f"매핑 파일 로드 오류: {e}")
+        return None, None, None
+        
+    return all_df, token2id, id2token
+
+@st.cache_data
+def load_cycle_data():
+    try:
+        with open("data/item_cycle_lookup.pkl", "rb") as f:
+            return pickle.load(f)
+    except:
+        return {} 
 
 @st.cache_resource
 def load_models():
-    # SASRec
     sas_path = 'data/SASRec-Nov-27-2025_10-12-11.pth'
-    sas_model, sas_items = None, 0
+    sas_model, sas_n_items = None, 0
     try:
-        ckpt = torch.load(sas_path, map_location=DEVICE, weights_only=False)
-        sas_items = ckpt['state_dict']['item_embedding.weight'].shape[0]
-        sas_model = SASRec(ckpt['config'], MockDataset(sas_items)).to(DEVICE)
-        sas_model.load_state_dict(ckpt['state_dict'])
+        checkpoint = torch.load(sas_path, map_location=DEVICE, weights_only=False)
+        sas_n_items = checkpoint['state_dict']['item_embedding.weight'].shape[0]
+        sas_model = SASRec(checkpoint['config'], MockDataset(sas_n_items)).to(DEVICE)
+        sas_model.load_state_dict(checkpoint['state_dict'])
         sas_model.eval()
+        
+        # 모델의 maxlen 가져오기
+        maxlen = checkpoint['config']['MAX_ITEM_LIST_LENGTH']
     except Exception as e:
         st.warning(f"SASRec 로드 실패: {e}")
+        maxlen = 50
 
-    # TiSASRec
-    tis_path = 'data/TiSASRec-Nov-28-2025_09-45-58.pth'
-    tis_model, tis_items = None, 0
-    tis_maxlen, tis_timespan = 50, 256
-    try:
-        ckpt = torch.load(tis_path, map_location=DEVICE, weights_only=False)
-        tis_items = ckpt['state_dict']['item_embedding.weight'].shape[0]
-        conf = ckpt['config']
-        tis_model = TiSASRec(conf, MockDataset(tis_items)).to(DEVICE)
-        tis_model.load_state_dict(ckpt['state_dict'])
-        tis_model.eval()
-        tis_maxlen = conf['MAX_ITEM_LIST_LENGTH']
-        tis_timespan = conf['time_span']
-    except Exception as e:
-        st.error(f"TiSASRec 로드 실패: {e}")
-
-    safe_n = min(sas_items, tis_items) if sas_items and tis_items else (tis_items or sas_items)
-        
-    return sas_model, tis_model, tis_maxlen, tis_timespan, safe_n
+    return sas_model, sas_n_items, maxlen
 
 # ------------------------------------------------------------------
-# 3. [기능 업그레이드] 페르소나 데이터 로드 함수 (폴더 경로 수정 반영)
+# 3. 페르소나 데이터 로드 함수
 # ------------------------------------------------------------------
 def load_persona_history(all_df, filename):
-    # data/personas 폴더 안에서 파일을 찾습니다.
     persona_path = os.path.join('data', 'personas', filename)
     
     if not os.path.exists(persona_path):
@@ -131,7 +118,6 @@ def load_persona_history(all_df, filename):
         return []
 
     try:
-        # 한글 인코딩 호환성 처리
         try:
             df = pd.read_csv(persona_path, encoding='utf-8')
         except UnicodeDecodeError:
@@ -139,16 +125,14 @@ def load_persona_history(all_df, filename):
 
         history = []
         for _, row in df.iterrows():
-            # 1. 시점 변환: "30일 전" -> 30 (숫자만 추출)
             days_str = str(row.get('시점', '0'))
             days_match = re.search(r'\d+', days_str)
             days = int(days_match.group()) if days_match else 0
             
-            # 2. 아이템 이름 확인 (csv 컬럼명 대응)
             item_name = row.get('상품 선택') or row.get('name')
             if not item_name: continue
 
-            # 3. meta_df에서 ID 찾기
+            # meta_df에서 이름 매칭
             matched_row = all_df[all_df['Item_Name'] == item_name]
             
             if not matched_row.empty:
@@ -159,265 +143,293 @@ def load_persona_history(all_df, filename):
                     'days_ago': days
                 })
             else:
-                # 매핑 실패 시 로깅 (UI에는 띄우지 않음)
-                print(f"매핑 실패: {item_name}")
+                pass # 매핑 실패는 무시
                 
         return history
     except Exception as e:
-        st.error(f"페르소나 로드 오류 ({filename}): {e}")
+        st.error(f"페르소나 로드 중 오류: {e}")
         return []
 
 # ------------------------------------------------------------------
-# 4. 메인 로직
+# 4. 로직 함수 (Cycle Filtering)
+# ------------------------------------------------------------------
+def check_cycle_filtering(days_ago, cycle_info):
+    if not cycle_info: return days_ago < 7
+    p10 = cycle_info.get('p10', 0)
+    p25 = cycle_info.get('p25', 0)
+    
+    if days_ago < p10: return random.random() < 0.95
+    elif p10 <= days_ago < p25: return random.random() < 0.5
+    else: return False
+
+# ------------------------------------------------------------------
+# 5. 메인 로직
 # ------------------------------------------------------------------
 def main():
-    st.set_page_config(layout="wide", page_title="Recommendation Model A/B Test")
-    st.title("🛍️ 쇼핑 패턴 기반 추천 A/B Test")
+    st.set_page_config(layout="wide", page_title="Recommendation Rule A/B Test")
+    st.title("🛍️ 쇼핑 패턴 기반 추천 Rule A/B Test")
 
-    all_df, vocab_tis, vocab_sas = load_data()
+    # [원복됨] 기존처럼 3개만 깔끔하게 받습니다.
+    all_df, token2id, id2token = load_data()
     if all_df is None: return
     
-    sas_model, tis_model, tis_maxlen, tis_timespan, safe_n = load_models()
+    cycle_data = load_cycle_data()
+    sas_model, safe_n_items, maxlen = load_models()
 
     # UI 필터링
-    valid_tokens = [t for t, i in vocab_tis['token2id'].items() if i < safe_n]
+    valid_tokens = [t for t, i in token2id.items() if i < safe_n_items]
     ui_df = all_df[all_df['item_id'].astype(str).isin(valid_tokens) & (all_df['purchase_count'] >= 10)].copy()
 
-    # 세션 상태 초기화
     if 'history' not in st.session_state: st.session_state['history'] = []
 
-    # ---------------- Sidebar: 입력 UI ----------------
+    # ---------------- Sidebar ----------------
     st.sidebar.header("🛒 구매 이력 구성")
     
-    # [1] 페르소나 선택 섹션 (업데이트: 폴더 스캔 및 선택 안함 옵션)
+    # [1] 페르소나 선택
     st.sidebar.subheader("1. 페르소나 선택")
-    
-    # personas 폴더 자동 생성 및 파일 스캔
     persona_dir = os.path.join('data', 'personas')
-    if not os.path.exists(persona_dir):
-        os.makedirs(persona_dir, exist_ok=True)
+    if not os.path.exists(persona_dir): os.makedirs(persona_dir, exist_ok=True)
         
     persona_files = [f for f in os.listdir(persona_dir) if f.endswith('.csv')]
-    
-    # '선택 안 함' 옵션을 맨 앞에 추가
     options = ["직접 입력 (선택 안 함)"] + persona_files
     
     selected_persona = st.sidebar.selectbox("테스터 유형을 선택하세요:", options)
     
-    # 파일을 선택했을 때만 로드 버튼 표시
     if selected_persona != "직접 입력 (선택 안 함)":
         if st.sidebar.button("📂 선택한 페르소나 불러오기"):
             persona_history = load_persona_history(all_df, selected_persona)
             if persona_history:
                 st.session_state['history'] = persona_history
-                # 날짜 내림차순 정렬 (최신이 위로)
                 st.session_state['history'].sort(key=lambda x: x['days_ago'], reverse=True)
-                st.success(f"'{selected_persona}' 로드 완료! ({len(persona_history)}개 아이템)")
-                st.session_state.pop('last_results', None) # 기존 결과 초기화
+                st.success(f"'{selected_persona}' 로드 완료!")
+                st.session_state.pop('raw_scores', None)
+                st.session_state.pop('ab_mapping', None)
                 st.rerun()
 
     st.sidebar.divider()
-    
-    # [2] 직접 추가 섹션
-    st.sidebar.subheader("2. 아이템 직접 추가")
-    if ui_df.empty:
-        st.error("표시할 아이템 데이터가 없습니다.")
-        return
 
-    l1 = st.sidebar.selectbox("대분류", sorted(ui_df['L1'].unique()))
-    l2 = st.sidebar.selectbox("중분류", sorted(ui_df[ui_df['L1']==l1]['L2'].unique()))
-    items = ui_df[(ui_df['L1']==l1) & (ui_df['L2']==l2)].sort_values(by='purchase_count', ascending=False)
-    
-    sel_item = st.sidebar.selectbox("상품 선택", options=items.to_dict('records'), 
-                                  format_func=lambda x: f"{x['Item_Name']} ({x['purchase_count']}회)")
-    days = st.sidebar.number_input("며칠 전 구매했나요?", 0, 365, 0)
-    
-    if st.sidebar.button("➕ 리스트에 추가"):
-        st.session_state['history'].append({
-            'item_id': str(sel_item['item_id']), 
-            'name': sel_item['Item_Name'], 
-            'days_ago': days
-        })
-        st.session_state['history'].sort(key=lambda x: x['days_ago'], reverse=True)
-        st.session_state.pop('last_results', None) # 결과 초기화
-        st.rerun()
+    # [2] 직접 추가
+    st.sidebar.subheader("2. 아이템 추가")
+    if not ui_df.empty:
+        l1 = st.sidebar.selectbox("대분류", sorted(ui_df['L1'].unique()))
+        l2 = st.sidebar.selectbox("중분류", sorted(ui_df[ui_df['L1']==l1]['L2'].unique()))
+        items = ui_df[(ui_df['L1']==l1) & (ui_df['L2']==l2)].sort_values(by='purchase_count', ascending=False)
+        
+        sel_item = st.sidebar.selectbox("상품 선택", options=items.to_dict('records'), 
+                                      format_func=lambda x: f"{x['Item_Name']} ({x['purchase_count']}회)")
+        days = st.sidebar.number_input("며칠 전 구매?", 0, 365, 0)
+        
+        if st.sidebar.button("➕ 리스트에 추가"):
+            st.session_state['history'].append({
+                'item_id': str(sel_item['item_id']),
+                'name': sel_item['Item_Name'],
+                'days_ago': days
+            })
+            st.session_state['history'].sort(key=lambda x: x['days_ago'], reverse=True)
+            st.rerun()
 
     if st.sidebar.button("🗑️ 전체 초기화"):
         st.session_state['history'] = []
-        st.session_state.pop('last_results', None)
+        st.session_state.pop('raw_scores', None) 
+        st.session_state.pop('ab_mapping', None) 
         st.rerun()
 
-    # ---------------- Main: 시퀀스 관리 및 추론 ----------------
-    st.subheader("📋 현재 시퀀스 (TimeLine)")
+    # --- Main: 시퀀스 확인 ---
+    st.subheader("📋 현재 구매 시퀀스")
     
     if not st.session_state['history']:
-        st.info("👈 좌측 사이드바에서 페르소나를 선택하거나, 아이템을 직접 추가해주세요.")
+        st.info("좌측 사이드바에서 페르소나를 선택하거나 아이템을 추가해주세요.")
     else:
-        # [기능 추가] 시퀀스 목록 및 개별 삭제 기능 구현
+        # 시퀀스 목록 + 삭제 버튼
         st.markdown("---")
-        # enumerate를 사용하여 인덱스를 확보 (삭제 시 필요)
         for i, item in enumerate(st.session_state['history']):
             col1, col2, col3 = st.columns([1, 6, 1])
+            time_str = "오늘" if item['days_ago'] == 0 else f"{item['days_ago']}일 전"
             
-            # 시간 표시 텍스트
-            if item['days_ago'] == 0:
-                time_str = "오늘"
-            else:
-                time_str = f"{item['days_ago']}일 전"
-            
-            with col1:
-                st.caption(time_str)
-            with col2:
-                st.write(f"**{item['name']}**")
+            with col1: st.caption(time_str)
+            with col2: st.write(f"**{item['name']}**")
             with col3:
-                # 삭제 버튼: 고유 key를 부여하여 충돌 방지
-                if st.button("❌", key=f"del_{i}", help="이 아이템만 삭제"):
+                if st.button("❌", key=f"del_{i}"):
                     st.session_state['history'].pop(i)
-                    st.session_state.pop('last_results', None) # 결과 초기화
+                    # 시퀀스 변경 시 결과도 초기화
+                    st.session_state.pop('raw_scores', None) 
+                    st.session_state.pop('ab_mapping', None)
                     st.rerun()
         st.markdown("---")
+    
+        st.sidebar.markdown("---")
+        st.sidebar.header("🎛️ 파라미터 튜닝")
+        alpha = st.sidebar.slider("재구매 가중치 (Alpha)", 0.0, 10.0, 2.0, 0.1)
         
+        # ------------------------------------------------------------------
         # 추론 버튼
-        if st.button("🚀 추천 결과 비교 (Model A vs B)", type="primary"):
+        # ------------------------------------------------------------------
+        if st.button("🚀 추천 결과 생성 (Logic A vs B)", type="primary"):
             if len(st.session_state['history']) < 2:
-                st.warning("정확한 분석을 위해 아이템을 2개 이상 입력해주세요.")
+                st.warning("아이템을 2개 이상 넣어주세요.")
             else:
-                with st.spinner("두 모델이 시퀀스를 분석 중입니다..."):
-                    # --- 입력 데이터 준비 ---
-                    t2i_tis = vocab_tis['token2id']
-                    ids_tis, days_list = [], []
+                with st.spinner("AI 분석 중..."):
+                    # [핵심] 버튼 누를 때마다 매핑(좌우 배치) 랜덤 재설정
+                    if 'ab_mapping' in st.session_state:
+                        del st.session_state['ab_mapping']
+                    
+                    # 1. 입력 변환
+                    hist_ids = []
                     for h in st.session_state['history']:
-                        if h['item_id'] in t2i_tis:
-                            ids_tis.append(t2i_tis[h['item_id']])
-                            days_list.append(h['days_ago'])
+                        if h['item_id'] in token2id:
+                            internal_id = token2id[h['item_id']]
+                            if internal_id < safe_n_items:
+                                hist_ids.append(internal_id)
                     
-                    t2i_sas = vocab_sas['token2id']
-                    ids_sas = []
-                    for h in st.session_state['history']:
-                        if h['item_id'] in t2i_sas:
-                            ids_sas.append(t2i_sas[h['item_id']])
+                    if not hist_ids: st.stop()
+                        
+                    # 2. SASRec 추론
+                    seq_ids = hist_ids[-maxlen:]
+                    pad_len = maxlen - len(seq_ids)
+                    input_ids = [0] * pad_len + seq_ids
+                    
+                    item_seq = torch.LongTensor([input_ids]).to(DEVICE)
+                    item_len = torch.LongTensor([maxlen]).to(DEVICE) # 길이 고정
 
-                    if not ids_tis or not ids_sas:
-                        st.error("매핑 가능한 아이템이 하나도 없습니다.")
-                        st.stop()
-
-                    # --- 추론 실행 ---
-                    
-                    # [Model A] SASRec
-                    # SASRec은 시간 정보 없이 아이템 시퀀스만 사용
-                    seq_sas = ids_sas[-tis_maxlen:]
-                    pad_len_sas = tis_maxlen - len(seq_sas)
-                    input_sas = torch.LongTensor([[0]*pad_len_sas + seq_sas]).to(DEVICE)
-                    len_sas = torch.LongTensor([tis_maxlen]).to(DEVICE) 
-                    
-                    topk_A_ids = []
                     if sas_model:
-                        inter_sas = Interaction({'item_id_list': input_sas, 'item_length': len_sas})
-                        scores_A = sas_model.full_sort_predict(inter_sas)
-                        scores_A = scores_A.cpu().detach().numpy()[0]
-                        topk_A_indices = np.argsort(scores_A)[::-1][:10]
-                        topk_A_ids = topk_A_indices.tolist()
+                        inter_sas = Interaction({'item_id_list': item_seq, 'item_length': item_len})
+                        raw_scores = sas_model.full_sort_predict(inter_sas).detach().cpu().numpy()[0]
+                        
+                        st.session_state['raw_scores'] = raw_scores
+                        st.session_state['has_run'] = True
+                        st.session_state['experiment_submitted'] = False
 
-                    # [Model B] TiSASRec
-                    # TiSASRec은 아이템 시퀀스 + 시간 간격(Interval) 정보 사용
-                    seq_tis = ids_tis[-tis_maxlen:]
-                    d_seq = days_list[-tis_maxlen:]
-                    pad_len_tis = tis_maxlen - len(seq_tis)
-                    input_tis = torch.LongTensor([[0]*pad_len_tis + seq_tis]).to(DEVICE)
-                    len_tis = torch.LongTensor([tis_maxlen]).to(DEVICE)
-                    
-                    # 시간 매트릭스 계산 (utils.py 의존)
-                    t_seq, t_mat = get_tisasrec_input(d_seq, tis_maxlen, tis_timespan)
-                    
-                    topk_B_ids = []
-                    if tis_model:
-                        inter_tis = Interaction({
-                            'item_id_list': input_tis, 'item_length': len_tis,
-                            'timestamp_list': t_seq.to(DEVICE), 'time_matrix': t_mat.to(DEVICE)
-                        })
-                        scores_B = tis_model.full_sort_predict(inter_tis)
-                        scores_B = scores_B.cpu().detach().numpy()[0]
-                        topk_B_indices = np.argsort(scores_B)[::-1][:10]
-                        topk_B_ids = topk_B_indices.tolist()
-
-                    # --- 결과 저장 (순서 랜덤 섞기: Blind Test) ---
-                    results_list = [
-                        {'ids': topk_A_ids, 'name': 'SASRec', 'type': 'A'},
-                        {'ids': topk_B_ids, 'name': 'TiSASRec', 'type': 'B'}
-                    ]
-                    random.shuffle(results_list)
-                    
-                    st.session_state['last_results'] = results_list
-
-    # ---------------- 결과 출력 ----------------
-    if 'last_results' in st.session_state:
-        st.divider()
-        st.subheader("🔎 추천 결과 비교 (Blind Test)")
+    # ------------------------------------------------------------------
+    # 결과 렌더링
+    # ------------------------------------------------------------------
+    if st.session_state.get('has_run', False) and 'raw_scores' in st.session_state:
+        raw_scores = st.session_state['raw_scores']
         
-        results = st.session_state['last_results']
-        res_left = results[0]
-        res_right = results[1]
+        # --- Logic A: History Boost ---
+        scores_A = raw_scores.copy()
+        item_counts = {}
+        for h in st.session_state['history']:
+            raw_id = h['item_id']
+            item_counts[raw_id] = item_counts.get(raw_id, 0) + 1
+            
+        for raw_id, count in item_counts.items():
+            if raw_id in token2id:
+                idx = token2id[raw_id]
+                if idx < len(scores_A):
+                    scores_A[idx] += alpha * np.log1p(count)
+
+        topk_A_ids = np.argsort(scores_A)[::-1][:10]
+
+        # --- Logic B: Cycle Filtering ---
+        scores_B = scores_A.copy()
         
-        # ID -> 정보 변환 헬퍼 함수
-        def get_item_info_detail(internal_id, model_type):
-            if model_type == 'A':
-                i2t = vocab_sas['id2token']
-            else:
-                i2t = vocab_tis['id2token']
-                
-            if internal_id in i2t:
-                raw_id = i2t[internal_id]
+        for h in st.session_state['history']:
+            raw_id = h['item_id']
+            days = h['days_ago']
+            if raw_id in token2id:
+                idx = token2id[raw_id]
+                if idx < len(scores_B):
+                    c_info = cycle_data.get(raw_id, {})
+                    if check_cycle_filtering(days, c_info):
+                        scores_B[idx] = -np.inf
+        
+        topk_B_ids = np.argsort(scores_B)[::-1][:10]
+
+        # --- [핵심] 랜덤 매핑 로직 ---
+        if 'ab_mapping' not in st.session_state:
+            st.session_state['ab_mapping'] = random.choice(['A_is_1', 'B_is_1'])
+
+        mapping = st.session_state['ab_mapping']
+        
+        if mapping == 'A_is_1':
+            opt1_ids, opt1_name = topk_A_ids, "Logic A (부스팅 Only)"
+            opt2_ids, opt2_name = topk_B_ids, "Logic B (부스팅 + 필터링)"
+        else:
+            opt1_ids, opt1_name = topk_B_ids, "Logic B (부스팅 + 필터링)"
+            opt2_ids, opt2_name = topk_A_ids, "Logic A (부스팅 Only)"
+
+        # Helper
+        def get_simple_info(idx):
+            name, cat = "Unknown", ""
+            if idx in id2token:
+                raw_id = id2token[idx]
                 row = all_df[all_df['item_id'].astype(str) == raw_id]
                 if not row.empty:
-                    d = row.iloc[0]
-                    return f"{d['L1']} > {d['L2']}", d['Item_Name']
-                return "Unknown Cat", "Unknown Name"
-            return "-", "-"
+                    name = row.iloc[0]['Item_Name']
+                    cat = row.iloc[0]['L2']
+            return f"[{cat}] {name}"
 
-        c1, c2 = st.columns(2)
+        # --- 화면 출력 ---
+        st.divider()
+        st.subheader("⚖️ 블라인드 테스트: 더 만족스러운 추천은?")
         
-        # 왼쪽 결과
-        with c1:
-            st.info("### Option 1")
-            for i, idx in enumerate(res_left['ids']):
+        bc1, bc2 = st.columns(2)
+        with bc1:
+            st.markdown("### 🅰️ Option 1")
+            for rank, idx in enumerate(opt1_ids):
                 if idx == 0: continue
-                cat, name = get_item_info_detail(idx, res_left['type'])
-                st.markdown(f"**{i+1}. [{cat}]**\n{name}")
+                st.write(f"{rank+1}. {get_simple_info(idx)}")
+
+        with bc2:
+            st.markdown("### 🅱️ Option 2")
+            for rank, idx in enumerate(opt2_ids):
+                if idx == 0: continue
+                st.write(f"{rank+1}. {get_simple_info(idx)}")
+
+        # --- 설문 폼 ---
+        st.markdown("---")
+        with st.form("ab_test_form"):
+            st.write("📝 **평가 입력**")
+            choice = st.radio("더 마음에 드는 추천 결과는?", ["Option 1", "Option 2"], horizontal=True)
+            reason = st.text_area("이유:")
             
-            if st.button("👈 Option 1 선택"):
-                # 로컬 CSV 저장
-                save_log(res_left['name'], res_right['name'], "Option 1")
-                st.balloons()
-                st.success(f"선택한 모델은 [{res_left['name']}] 입니다!")
-
-        # 오른쪽 결과
-        with c2:
-            st.success("### Option 2")
-            for i, idx in enumerate(res_right['ids']):
-                if idx == 0: continue
-                cat, name = get_item_info_detail(idx, res_right['type'])
-                st.markdown(f"**{i+1}. [{cat}]**\n{name}")
+            if st.form_submit_button("제출 및 결과 확인", type="primary"):
+                st.session_state['experiment_submitted'] = True
+                st.session_state['user_choice'] = choice
                 
-            if st.button("👉 Option 2 선택"):
-                # 로컬 CSV 저장
-                save_log(res_right['name'], res_left['name'], "Option 2")
-                st.balloons()
-                st.success(f"선택한 모델은 [{res_right['name']}] 입니다!")
+                # 저장 로직 (로컬 CSV)
+                log_data = {
+                    "timestamp": pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    "user_choice": choice,
+                    "logic_left": opt1_name,
+                    "logic_right": opt2_name,
+                    "winner": opt1_name if choice == "Option 1" else opt2_name,
+                    "reason": reason
+                }
+                
+                save_df = pd.DataFrame([log_data])
+                csv_file = 'ab_test_results.csv'
+                try:
+                    if not os.path.exists(csv_file):
+                        save_df.to_csv(csv_file, index=False, encoding='utf-8-sig')
+                    else:
+                        save_df.to_csv(csv_file, index=False, header=False, mode='a', encoding='utf-8-sig')
+                    st.success("데이터 저장 완료!")
+                except Exception as e:
+                    st.error(f"저장 실패: {e}")
 
-# CSV 저장 함수
-def save_log(winner_model, loser_model, choice_label):
-    log_data = {
-        "timestamp": pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S'),
-        "winner": winner_model,
-        "loser": loser_model,
-        "user_choice": choice_label
-    }
-    file_path = 'ab_test_results.csv'
-    df = pd.DataFrame([log_data])
-    if not os.path.exists(file_path):
-        df.to_csv(file_path, index=False, encoding='utf-8-sig')
-    else:
-        df.to_csv(file_path, index=False, header=False, mode='a', encoding='utf-8-sig')
+        # --- 결과 공개 ---
+        if st.session_state.get('experiment_submitted', False):
+            st.divider()
+            st.header("🔓 결과 공개")
+            
+            user_pick = st.session_state['user_choice']
+            real_logic = opt1_name if user_pick == "Option 1" else opt2_name
+            
+            st.success(f"당신의 선택: **{user_pick}**")
+            st.info(f"실제 로직: **{real_logic}**")
+            
+            rc1, rc2 = st.columns(2)
+            with rc1:
+                st.markdown(f"### {opt1_name}")
+                for rank, idx in enumerate(opt1_ids):
+                    if idx==0: continue
+                    st.caption(f"{rank+1}. {get_simple_info(idx)}")
+            with rc2:
+                st.markdown(f"### {opt2_name}")
+                for rank, idx in enumerate(opt2_ids):
+                    if idx==0: continue
+                    st.caption(f"{rank+1}. {get_simple_info(idx)}")
 
 if __name__ == "__main__":
     main()
